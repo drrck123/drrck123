@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Archery Defense</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f0f0;
+            touch-action: none;
+        }
+        canvas {
+            border: 1px solid black;
+            max-width: 100%;
+        }
+        h1 {
+            font-family: Arial, sans-serif;
+            margin: 10px;
+        }
+        #barrageButton {
+            margin: 10px;
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #808080;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: not-allowed;
+            display: none;
+        }
+        #barrageButton.active {
+            background-color: #ff4500;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>Archery Defense</h1>
+    <canvas id="gameCanvas" width="800" height="400"></canvas>
+    <button id="barrageButton">Arrow Barrage (0)</button>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const barrageButton = document.getElementById('barrageButton');
+
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = 800 * dpr;
+        canvas.height = 400 * dpr;
+        ctx.scale(dpr, dpr);
+        canvas.style.width = '800px';
+        canvas.style.height = '400px';
+
+        const archerX = 50;
+        const archerY = 350;
+        let aimAngle = 0;
+        let arrows = [];
+        let score = 0;
+        let gameOver = false;
+        let power = 0;
+        let isCharging = false;
+        let shotCooldown = 0;
+        const SHOT_COOLDOWN_TIME = 15;
+        const GRAVITY = 0.1;
+        let level = 1;
+        const BASE_ENEMIES = 3;
+        let enemiesToSpawn = BASE_ENEMIES;
+        let enemiesDefeated = 0;
+        let awaitingNextLevel = false;
+        let scoreDisplays = [];
+        let barrageCount = 0;
+        let lastScoreCheck = 0;
+        let spawnCounter = 0; // Track spawned enemies for wave spacing
+
+        const skyGradient = ctx.createLinearGradient(0, 0, 0, 200);
+        skyGradient.addColorStop(0, '#87CEEB');
+        skyGradient.addColorStop(1, '#E0F6FF');
+
+        const groundCanvas = document.createElement('canvas');
+        groundCanvas.width = 32;
+        groundCanvas.height = 32;
+        const groundCtx = groundCanvas.getContext('2d');
+        groundCtx.fillStyle = '#4CAF50';
+        groundCtx.fillRect(0, 0, 32, 32);
+        for (let i = 0; i < 20; i++) {
+            groundCtx.fillStyle = `rgba(34, ${139 + Math.random() * 50}, 34, 0.7)`;
+            groundCtx.fillRect(Math.random() * 32, Math.random() * 32, 2, 4);
+        }
+        const groundPattern = ctx.createPattern(groundCanvas, 'repeat');
+
+        class ScoreDisplay {
+            constructor(x, y, points) {
+                this.x = x;
+                this.y = y;
+                this.points = points;
+                this.size = 10;
+                this.life = 60;
+                this.opacity = 1;
+            }
+
+            update() {
+                this.y -= 0.5;
+                this.size += 0.5;
+                this.life--;
+                this.opacity = this.life / 60;
+            }
+        }
+
+        class Enemy {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.baseSpeed = -1 - Math.random() * 0.5;
+                this.speed = this.baseSpeed * (1 + (level - 1) * 0.05);
+                this.active = true;
+                this.rotation = 0;
+                this.hitByArrow = null;
+                this.arrowOffsetX = 0;
+                this.arrowOffsetY = 0;
+                this.arrowRotation = 0;
+                this.bloodParticles = [];
+                this.bloodPools = [];
+                this.weaponType = Math.random() < 0.5 ? 'knife' : 'sword';
+                this.weaponHand = Math.random() < 0.5 ? 'left' : 'right'; // Random hand
+                this.weaponSize = 10 + Math.random() * 10;
+                this.health = 2;
+                this.sizeScale = 1 + (level - 1) * 0.05;
+                this.legAngle = 0; // For walking animation
+                this.legDirection = 1; // Oscillate legs
+            }
+
+            hit(isHeadshot, distance) {
+                if (isHeadshot) {
+                    this.health = 0;
+                } else {
+                    this.health--;
+                }
+                this.addBlood();
+                if (this.health <= 0) {
+                    this.active = false;
+                    enemiesDefeated++;
+                    const basePoints = 10;
+                    const headshotMultiplier = isHeadshot ? 2 : 1;
+                    const distanceBonus = Math.floor(distance / 50);
+                    const points = basePoints * headshotMultiplier + distanceBonus;
+                    score += points;
+                    scoreDisplays.push(new ScoreDisplay(this.x, this.y - 30, points));
+                }
+            }
+
+            addBlood() {
+                for (let i = 0; i < 5; i++) {
+                    this.bloodParticles.push({
+                        x: this.arrowOffsetX,
+                        y: this.arrowOffsetY,
+                        vx: (Math.random() - 0.5) * 2,
+                        vy: (Math.random() - 0.5) * 2,
+                        size: Math.random() * 3 + 1,
+                        life: 30
+                    });
+                }
+                this.bloodPools.push({
+                    x: this.arrowOffsetX,
+                    y: this.arrowOffsetY,
+                    size: 3 + Math.random() * 3,
+                    maxSize: 12 + Math.random() * 6
+                });
+            }
+
+            updateBloodPools() {
+                // Only update pools when enemy is on ground
+                if (!this.active && this.rotation >= Math.PI / 2) {
+                    this.bloodPools.forEach(pool => {
+                        if (pool.size < pool.maxSize) {
+                            pool.size += 0.1;
+                        }
+                    });
+                }
+            }
+
+            updateLegs() {
+                if (this.active) {
+                    this.legAngle += 0.1 * this.legDirection;
+                    if (this.legAngle > Math.PI / 6) this.legDirection = -1;
+                    if (this.legAngle < -Math.PI / 6) this.legDirection = 1;
+                }
+            }
+        }
+        let enemies = [];
+        let spawnTimer = 0;
+
+        class Arrow {
+            constructor(x, y, velocityX, velocityY) {
+                this.x = x;
+                this.y = y;
+                this.velocityX = velocityX;
+                this.velocityY = velocityY;
+                this.active = true;
+                this.rotation = Math.atan2(velocityY, velocityX);
+            }
+        }
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (gameOver) {
+                resetGame();
+                return;
+            }
+            if (awaitingNextLevel) {
+                levelUp();
+                return;
+            }
+            if (!isCharging && shotCooldown <= 0) {
+                isCharging = true;
+                power = 0;
+            }
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            const touchX = (touch.clientX - rect.left) * (800 / rect.width);
+            const touchY = (touch.clientY - rect.top) * (800 / rect.width);
+            aimAngle = Math.atan2(touchY - archerY, touchX - archerX);
+            aimAngle = Math.max(-Math.PI / 2, Math.min(Math.PI / 4, aimAngle));
+        });
+
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            if (isCharging && shotCooldown <= 0) {
+                isCharging = false;
+                const speed = 5 + (power / 20);
+                const velocityX = Math.cos(aimAngle) * speed;
+                const velocityY = Math.sin(aimAngle) * speed;
+                arrows.push(new Arrow(archerX + 20, archerY - 20, velocityX, velocityY));
+                shotCooldown = SHOT_COOLDOWN_TIME;
+            }
+        });
+
+        barrageButton.addEventListener('click', () => {
+            if (barrageCount > 0 && !gameOver && !awaitingNextLevel) {
+                triggerBarrage();
+                barrageCount--;
+                updateBarrageButton();
+            }
+        });
+
+        function resetGame() {
+            arrows = [];
+            enemies = [];
+            scoreDisplays = [];
+            level = 1;
+            enemiesToSpawn = BASE_ENEMIES;
+            enemiesDefeated = 0;
+            score = 0;
+            gameOver = false;
+            awaitingNextLevel = false;
+            shotCooldown = 0;
+            barrageCount = 0;
+            lastScoreCheck = 0;
+            spawnCounter = 0;
+            updateBarrageButton();
+        }
+
+        function levelUp() {
+            level++;
+            enemiesToSpawn = BASE_ENEMIES + Math.floor((level - 1) * 1.5);
+            enemiesDefeated = 0;
+            enemies = [];
+            scoreDisplays = [];
+            awaitingNextLevel = false;
+            shotCooldown = 0;
+            spawnCounter = 0;
+        }
+
+        function triggerBarrage() {
+            for (let i = 0; i < 25; i++) {
+                const x = 0;
+                const y = Math.random() * 200 + 100;
+                const velocityX = 5 + Math.random() * 5;
+                const velocityY = (Math.random() - 0.5) * 4;
+                arrows.push(new Arrow(x, y, velocityX, velocityY));
+            }
+        }
+
+        function updateBarrageButton() {
+            barrageButton.textContent = `Arrow Barrage (${barrageCount})`;
+            if (barrageCount > 0) {
+                barrageButton.classList.add('active');
+                barrageButton.style.display = 'block';
+            } else {
+                barrageButton.classList.remove('active');
+                barrageButton.style.display = 'none';
+            }
+        }
+
+        function update() {
+            if (gameOver || awaitingNextLevel) return;
+
+            if (isCharging) {
+                power = Math.min(power + 1, 100);
+            }
+            if (shotCooldown > 0) {
+                shotCooldown--;
+            }
+
+            const newBarrages = Math.floor(score / 100) - Math.floor(lastScoreCheck / 100);
+            if (newBarrages > 0) {
+                barrageCount += newBarrages;
+                updateBarrageButton();
+            }
+            lastScoreCheck = score;
+
+            spawnTimer++;
+            if (spawnTimer >= 60 && enemies.length < enemiesToSpawn) {
+                // Adjust spawn spacing: wider at start, tighter at end
+                const progress = spawnCounter / enemiesToSpawn;
+                const baseDelay = 60;
+                const minDelay = 20;
+                const spawnDelay = baseDelay - (baseDelay - minDelay) * progress;
+                if (spawnTimer >= spawnDelay) {
+                    enemies.push(new Enemy(800, 300 + Math.random() * 50));
+                    spawnTimer = 0;
+                    spawnCounter++;
+                }
+            }
+
+            enemies.forEach(enemy => {
+                if (enemy.active) {
+                    enemy.x += enemy.speed;
+                    if (enemy.x <= archerX + 20) {
+                        gameOver = true;
+                    }
+                    enemy.updateLegs();
+                } else if (enemy.rotation < Math.PI / 2) {
+                    enemy.rotation += 0.05;
+                    enemy.y += 1;
+                }
+                enemy.bloodParticles.forEach(p => {
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    p.vy += GRAVITY * 0.2;
+                    p.life--;
+                });
+                enemy.bloodParticles = enemy.bloodParticles.filter(p => p.life > 0);
+                enemy.updateBloodPools();
+            });
+
+            arrows.forEach(arrow => {
+                if (arrow.active) {
+                    arrow.x += arrow.velocityX;
+                    arrow.velocityY += GRAVITY;
+                    arrow.y += arrow.velocityY;
+                    arrow.rotation = Math.atan2(arrow.velocityY, arrow.velocityX);
+
+                    enemies.forEach(enemy => {
+                        if (enemy.active) {
+                            const headHit = arrow.x >= enemy.x - 5 * enemy.sizeScale && 
+                                          arrow.x <= enemy.x + 5 * enemy.sizeScale &&
+                                          arrow.y >= enemy.y - 35 * enemy.sizeScale && 
+                                          arrow.y <= enemy.y - 25 * enemy.sizeScale;
+                            const neckHit = arrow.x >= enemy.x - 5 * enemy.sizeScale && 
+                                          arrow.x <= enemy.x + 5 * enemy.sizeScale &&
+                                          arrow.y >= enemy.y - 25 * enemy.sizeScale && 
+                                          arrow.y <= enemy.y - 20 * enemy.sizeScale;
+                            const bodyHit = arrow.x >= enemy.x - 10 * enemy.sizeScale && 
+                                          arrow.x <= enemy.x + 10 * enemy.sizeScale &&
+                                          arrow.y >= enemy.y - 20 * enemy.sizeScale && 
+                                          arrow.y <= enemy.y;
+
+                            if (headHit || neckHit || bodyHit) {
+                                arrow.active = false;
+                                enemy.hitByArrow = arrow;
+                                enemy.arrowOffsetX = arrow.x - enemy.x;
+                                enemy.arrowOffsetY = arrow.y - enemy.y;
+                                enemy.arrowRotation = arrow.rotation;
+                                const distance = enemy.x - archerX;
+                                enemy.hit(headHit || neckHit, distance);
+                            }
+                        }
+                    });
+
+                    if (arrow.x > 800 || arrow.y > 400) arrow.active = false;
+                }
+            });
+
+            scoreDisplays.forEach(display => display.update());
+            scoreDisplays = scoreDisplays.filter(display => display.life > 0);
+
+            if (enemiesDefeated === enemiesToSpawn && 
+                enemies.every(e => !e.active && e.rotation >= Math.PI / 2)) {
+                awaitingNextLevel = true;
+            }
+        }
+
+        function drawBow(x, y, angle, pullDistance) {
+            ctx.save();
+            ctx.translate(x, y - 10);
+            ctx.rotate(angle);
+            ctx.strokeStyle = '#8B4513';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(0, -25);
+            ctx.quadraticCurveTo(15, 0, 0, 25);
+            ctx.stroke();
+            
+            ctx.strokeStyle = 'gray';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, -25);
+            ctx.quadraticCurveTo(-pullDistance, 0, 0, 25);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        function drawAimingGuide() {
+            if (isCharging) {
+                ctx.save();
+                ctx.translate(archerX + 20, archerY - 20);
+                ctx.rotate(aimAngle);
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                
+                let x = 0;
+                let y = 0;
+                let vx = Math.cos(0) * (5 + power / 20);
+                let vy = Math.sin(0) * (5 + power / 20);
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                for (let i = 0; i < 20; i++) {
+                    x += vx;
+                    vy += GRAVITY;
+                    y += vy;
+                    ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+        }
+
+        function drawArrow(x, y, rotation, isStuck = false, enemyScale = 1) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(rotation);
+
+            if (!isStuck) {
+                ctx.fillStyle = 'brown';
+                ctx.fillRect(-15, -1, 15, 2);
+                ctx.fillStyle = 'black';
+                ctx.fillRect(0, -1, 15, 2);
+                ctx.fillStyle = 'gray';
+                ctx.beginPath();
+                ctx.moveTo(15, -3);
+                ctx.lineTo(20, 0);
+                ctx.lineTo(15, 3);
+                ctx.fill();
+            } else {
+                const bodyWidth = 20 * enemyScale;
+                const stickOut = 5;
+                ctx.fillStyle = 'brown';
+                ctx.fillRect(-stickOut - bodyWidth / 2, -1, bodyWidth / 2, 2);
+                ctx.fillStyle = 'black';
+                ctx.fillRect(0, -1, bodyWidth / 2, 2);
+                ctx.fillStyle = 'gray';
+                ctx.beginPath();
+                ctx.moveTo(bodyWidth / 2, -3);
+                ctx.lineTo(bodyWidth / 2 + stickOut, 0);
+                ctx.lineTo(bodyWidth / 2, 3);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+
+        function drawBackground() {
+            ctx.fillStyle = skyGradient;
+            ctx.fillRect(0, 0, 800, 400);
+
+            ctx.fillStyle = '#5A4D41';
+            ctx.beginPath();
+            ctx.moveTo(0, 200);
+            ctx.lineTo(200, 100);
+            ctx.lineTo(400, 150);
+            ctx.lineTo(600, 120);
+            ctx.lineTo(800, 200);
+            ctx.lineTo(800, 400);
+            ctx.lineTo(0, 400);
+            ctx.fill();
+
+            ctx.fillStyle = '#808080';
+            ctx.fillRect(650, 150, 100, 50);
+            ctx.fillRect(670, 130, 20, 20);
+            ctx.fillRect(710, 130, 20, 20);
+            ctx.fillStyle = '#666';
+            ctx.beginPath();
+            ctx.moveTo(670, 130);
+            ctx.lineTo(690, 110);
+            ctx.lineTo(710, 130);
+            ctx.lineTo(730, 130);
+            ctx.lineTo(720, 120);
+            ctx.lineTo(710, 130);
+            ctx.lineTo(690, 120);
+            ctx.lineTo(670, 130);
+            ctx.fill();
+
+            ctx.fillStyle = groundPattern;
+            ctx.fillRect(0, 200, 800, 200);
+        }
+
+        function draw() {
+            drawBackground();
+
+            ctx.save();
+            ctx.translate(archerX, archerY);
+            ctx.fillStyle = 'brown';
+            ctx.fillRect(-10, -10, 10, 20);
+            ctx.fillRect(0, -10, 10, 20);
+            ctx.fillStyle = 'green';
+            ctx.fillRect(-10, -30, 20, 20);
+            
+            const pullDistance = isCharging ? power / 5 : 0;
+
+            ctx.save();
+            ctx.translate(0, -25);
+            ctx.rotate(aimAngle * 0.3);
+            ctx.fillStyle = 'peachpuff';
+            ctx.fillRect(0, -2.5, 25, 5);
+            ctx.restore();
+
+            ctx.save();
+            ctx.translate(0, -25);
+            ctx.rotate(aimAngle * 0.8);
+            ctx.translate(-pullDistance, 0);
+            ctx.fillStyle = 'peachpuff';
+            ctx.fillRect(0, -2.5, 20 + pullDistance, 5);
+            ctx.restore();
+
+            ctx.fillStyle = 'peachpuff';
+            ctx.beginPath();
+            ctx.arc(0, -40, 10, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+
+            drawBow(archerX + 20, archerY - 20, aimAngle, pullDistance);
+            drawAimingGuide();
+
+            enemies.forEach(enemy => {
+                ctx.save();
+                ctx.translate(enemy.x, enemy.y);
+                ctx.rotate(enemy.rotation);
+                ctx.scale(enemy.sizeScale, enemy.sizeScale);
+
+                ctx.fillStyle = 'rgba(139, 0, 0, 0.7)';
+                enemy.bloodPools.forEach(pool => {
+                    ctx.beginPath();
+                    ctx.arc(pool.x, pool.y, pool.size, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+
+                ctx.fillStyle = 'red';
+                enemy.bloodParticles.forEach(p => {
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+
+                ctx.restore();
+
+                if (enemy.hitByArrow) {
+                    ctx.save();
+                    ctx.translate(enemy.x, enemy.y);
+                    ctx.rotate(enemy.rotation);
+                    drawArrow(enemy.arrowOffsetX, enemy.arrowOffsetY, enemy.arrowRotation, true, enemy.sizeScale);
+                    ctx.restore();
+                }
+
+                ctx.save();
+                ctx.translate(enemy.x, enemy.y);
+                ctx.rotate(enemy.rotation);
+                ctx.scale(enemy.sizeScale, enemy.sizeScale);
+
+                ctx.fillStyle = 'purple';
+                ctx.fillRect(-10, -20, 20, 20);
+                ctx.fillStyle = 'pink';
+                ctx.beginPath();
+                ctx.arc(0, -30, 10, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'black';
+                
+                // Animate legs
+                ctx.save();
+                ctx.translate(-10, 0);
+                ctx.rotate(enemy.legAngle);
+                ctx.fillRect(0, 0, 5, 20);
+                ctx.restore();
+                ctx.save();
+                ctx.translate(5, 0);
+                ctx.rotate(-enemy.legAngle);
+                ctx.fillRect(0, 0, 5, 20);
+                ctx.restore();
+
+                // Weapon in random hand
+                ctx.save();
+                const weaponX = enemy.weaponHand === 'left' ? -10 : 10;
+                ctx.translate(weaponX, -10);
+                ctx.rotate(enemy.weaponHand === 'left' ? Math.PI / 4 : -Math.PI / 4);
+                ctx.fillStyle = '#666';
+                if (enemy.weaponType === 'knife') {
+                    ctx.fillRect(0, -2, enemy.weaponSize, 4);
+                    ctx.fillStyle = '#333';
+                    ctx.fillRect(-3, -1, 3, 2);
+                } else {
+                    ctx.fillRect(0, -2, enemy.weaponSize, 4);
+                    ctx.fillStyle = '#333';
+                    ctx.fillRect(-5, -2, 5, 4);
+                    ctx.fillRect(-8, -1, 3, 2);
+                }
+                ctx.restore();
+
+                ctx.restore();
+            });
+
+            ctx.fillStyle = 'black';
+            arrows.forEach(arrow => {
+                if (arrow.active) {
+                    drawArrow(arrow.x, arrow.y, arrow.rotation);
+                }
+            });
+
+            scoreDisplays.forEach(display => {
+                ctx.save();
+                ctx.font = `${display.size}px Arial`;
+                ctx.fillStyle = `rgba(255, 255, 0, ${display.opacity})`;
+                ctx.textAlign = 'center';
+                ctx.fillText(display.points, display.x, display.y);
+                ctx.restore();
+            });
+
+            ctx.fillStyle = 'black';
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Level: ${level}`, 10, 20);
+            ctx.fillText(`Score: ${score}`, 10, 40);
+            ctx.fillText(`Enemies: ${enemiesToSpawn - enemiesDefeated}`, 10, 60);
+
+            if (isCharging) {
+                ctx.fillStyle = 'green';
+                ctx.fillRect(10, 80, power, 10);
+                ctx.strokeStyle = 'black';
+                ctx.strokeRect(10, 80, 100, 10);
+            }
+            if (shotCooldown > 0) {
+                ctx.fillStyle = 'red';
+                ctx.fillRect(10, 100, (shotCooldown / SHOT_COOLDOWN_TIME) * 100, 10);
+                ctx.strokeStyle = 'black';
+                ctx.strokeRect(10, 100, 100, 10);
+            }
+
+            if (gameOver) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, 800, 400);
+                ctx.fillStyle = 'white';
+                ctx.font = '30px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`Game Over! Score: ${score}`, 400, 180);
+                ctx.font = '20px Arial';
+                ctx.fillText('Tap to Restart', 400, 220);
+                ctx.textAlign = 'left';
+            } else if (awaitingNextLevel) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, 800, 400);
+                ctx.fillStyle = 'white';
+                ctx.font = '30px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`Level ${level} Complete!`, 400, 180);
+                ctx.font = '20px Arial';
+                ctx.fillText('Tap for Next Level', 400, 220);
+                ctx.textAlign = 'left';
+            }
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        updateBarrageButton();
+        gameLoop();
+    </script>
+</body>
+</html>
